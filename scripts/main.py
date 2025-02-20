@@ -1,19 +1,22 @@
-import sys
-from PySide6 import QtWidgets
-from otbio_lsl_sender.view.main_window import MainWindow
+import keyboard
+from datetime import datetime
+from otbio_lsl_sender.model.otbio400_reader import OTBioelettronica400_Reader
 
 if __name__ == "__main__":
-    #Create the QT application
-    app = QtWidgets.QApplication(sys.argv)
 
-    #Instantiate the MainWindow object
-    window = MainWindow()
+    reader = OTBioelettronica400_Reader()
+    reader.StartCommunication()
 
-    #Display the main window
-    window.show()
+    dt_start: datetime = datetime.now()
 
-    #Turn control over to QT's main loop
-    sys.exit(app.exec())
-
-
-
+    while True:  
+        dt_end: datetime = datetime.now()
+        if (dt_end - dt_start).total_seconds() >= 10:
+            dt_start = dt_end
+            print("Main thread pulse: " + datetime.now().isoformat())
+        #Check if the user pressed a key
+        try:
+            if keyboard.is_pressed('q'): 
+                break  # finishing the loop
+        except:
+            pass

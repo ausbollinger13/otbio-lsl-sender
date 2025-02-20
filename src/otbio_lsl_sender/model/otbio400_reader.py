@@ -4,9 +4,13 @@ import time
 import threading
 from datetime import datetime
 
+from pylsl import StreamInfo, StreamOutlet, local_clock
+
 class OTBioelettronica400_Reader:
 
     #region Some options
+
+    DEBUG_MODE: bool = False
 
     FRAMES_PER_SECOND = 16
 
@@ -181,13 +185,22 @@ class OTBioelettronica400_Reader:
         return crc
 
     def _receive_data(self):
+        # Create a new StreamInfo object that will tell LSL what our stream contains
+        # The last value should be the serial number of the device or some other 
+        # more or less locally unique identifier for the stream as far as available 
+        # (could also omit it but interrupted connections wouldn't auto-recover)
+        info: StreamInfo = StreamInfo("OTBioelettronica 400", "EMG", self.NumberOfChannels, self.SamplingFrequency, "float32", "myuid34234")
+
+        # Next make an outlet for LSL
+        outlet: StreamOutlet = StreamOutlet(info)
+
         #Instantiate a byte buffer to hold data as it comes in from the device
         buffer = b''
 
         #Define the number of bytes we expect to receive each frame
         expected_bytes = 2 * int((self.NumberOfChannels * self.SamplingFrequency) / OTBioelettronica400_Reader.FRAMES_PER_SECOND)
 
-        #Track some stats
+        #Track some performance metrics
         frame_count: int = 0
         samples_streamed: int = 0
         dt_start: datetime = datetime.now()
@@ -195,10 +208,13 @@ class OTBioelettronica400_Reader:
 
         #Loop infinitely
         while self.communication:
+
+            #Keep track of some performance metrics
             dt_end = datetime.now()
             if (dt_end - dt_start).total_seconds() >= 1.0:
+                if (OTBioelettronica400_Reader.DEBUG_MODE):
+                    print(f"Samples per second = {samples_streamed}, frames per second = {frame_count}")
                 dt_start = dt_end
-                print(f"Samples per second = {samples_streamed}, frames per second = {frame_count}")
                 samples_streamed = 0
                 frame_count = 0
 
@@ -218,38 +234,17 @@ class OTBioelettronica400_Reader:
                 new_data = np.frombuffer(data, dtype=np.int16).reshape(int(self.SamplingFrequency / OTBioelettronica400_Reader.FRAMES_PER_SECOND), self.NumberOfChannels)
                 data_length = new_data.shape[0]
 
-                if samples_streamed == expected_bytes:
-                    print(new_data.shape)
+                #Push the chunk to LSL
+                outlet.push_chunk(new_data)
 
             except Exception as e:
                 print(f"An error occurred: {e}")
                 break
 
+            #Pause for a small amount of time to give the computer
+            #some breathing room
+            #time.sleep(0.01)
+
     #endregion
 
-#def update_plot():
-#    latest_data = np.roll(data_buffer, -buffer_index, axis=0)
-#    for plot_index, channel_index in enumerate(PlotChan):
-#        curves[plot_index].setData((latest_data[:, channel_index]) * GainFactor + offset * plot_index)
-
-if __name__ == "__main__":
-    import keyboard
-    from datetime import datetime
-
-    reader = OTBioelettronica400_Reader()
-    reader.StartCommunication()
-
-    dt_start: datetime = datetime.now()
-
-    while True:  
-        dt_end: datetime = datetime.now()
-        if (dt_end - dt_start).total_seconds() >= 10:
-            dt_start = dt_end
-            print("Main thread pulse: " + datetime.now().isoformat())
-        #Check if the user pressed a key
-        try:
-            if keyboard.is_pressed('q'): 
-                break  # finishing the loop
-        except:
-            pass
 
