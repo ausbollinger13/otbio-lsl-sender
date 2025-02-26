@@ -235,7 +235,8 @@ class OTBioelettronica400_Reader:
                 data_length = new_data.shape[0]
 
                 #Push the chunk to LSL
-                outlet.push_chunk(new_data)
+                for i in range(0, data_length):
+                    outlet.push_sample(new_data[i, :])
 
             except Exception as e:
                 print(f"An error occurred: {e}")
@@ -243,7 +244,7 @@ class OTBioelettronica400_Reader:
 
             #Pause for a small amount of time to give the computer
             #some breathing room
-            #time.sleep(0.01)
+            time.sleep(0.033)
 
     #endregion
 
