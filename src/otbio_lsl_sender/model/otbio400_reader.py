@@ -71,6 +71,7 @@ class OTBioelettronica400_Reader:
         # Open the TCP socket
         self.tcpSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.tcpSocket.connect((self.IpAddress, self.TCPPort))
+        self.tcpSocket.settimeout(5)
 
         # Send the configuration to Quattrocento
         self.tcpSocket.sendall(bytearray(self.ConfString))
@@ -231,7 +232,7 @@ class OTBioelettronica400_Reader:
                 recv_failed: bool = False
                 while len(buffer) < expected_bytes:
                     #The flag value of 0x40 makes this a non-blocking call
-                    buffer += self.tcpSocket.recv(expected_bytes - len(buffer), 0x40)
+                    buffer += self.tcpSocket.recv(expected_bytes - len(buffer))
 
                     dt_current: datetime = datetime.now()
                     if ((dt_current - dt_recv_start).total_seconds() >= 10.0):
