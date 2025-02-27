@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from PySide6.QtGui import QFont
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import QThreadPool, QTimer
 from PySide6 import QtCore
 
 from ..model.otbio400_reader import OTBioelettronica400_Reader
@@ -36,6 +36,10 @@ class MainWindow(QMainWindow):
 
         # Initialize a set of messages that will be displayed in the session message box
         self._session_messages: list[SessionMessage] = []
+
+        #Initialize a timer
+        self._background_timer: QTimer = QTimer()
+        self._background_timer.connect(self._check_background_thread_message_queue())
 
         # Set up window title and size
         self.setWindowTitle("TxBDC OTBioelettronica 400 LSL Sender")
@@ -101,9 +105,15 @@ class MainWindow(QMainWindow):
             #Stop the communication
             self._otbio_reader.StopCommunication()
 
+            #Stop the timer
+            self._background_timer.stop()
+
             #Change the text and the text color of the start/stop button
             self._start_stop_button.setText("Start")
             self._start_stop_button.setStyleSheet('QPushButton {color: green;}')
+
+            self._session_messages.append(SessionMessage("Stopped"))
+            self._update_session_messages()
 
             pass
         else:
@@ -111,14 +121,20 @@ class MainWindow(QMainWindow):
             self._session_messages.append(SessionMessage("Starting..."))
             self._update_session_messages()
 
-            #Start communication
             try:
+                #Start communication
                 self._otbio_reader.StartCommunication()
 
                 #Change the text and the text color of the start/stop button
                 self._start_stop_button.setText("Stop")
                 self._start_stop_button.setStyleSheet('QPushButton {color: red;}')
+
+                self._session_messages.append(SessionMessage("Started"))
+                self._update_session_messages()
+
+                self._background_timer.start(1000)
             except Exception as e:
+                #If an error was encountered, then show the error to the user
                 self._session_messages.append(SessionMessage("Error while attempting to start!"))
                 if hasattr(e, 'message'):
                     self._session_messages.append(SessionMessage(f"Error: {e.message}"))
@@ -131,6 +147,10 @@ class MainWindow(QMainWindow):
     #endregion
 
     #region Private methods
+
+    def _check_background_thread_message_queue (self) -> None:
+        self._session_messages.append(SessionMessage("Hello, World!"))
+        self._update_session_messages()
 
     def _update_session_messages (self) -> None:
         self._session_message_box.appendHtml(self._session_messages[-1].formatted_message_text)

@@ -5,6 +5,9 @@ import threading
 from datetime import datetime
 
 from pylsl import StreamInfo, StreamOutlet, local_clock
+from queue import Queue
+
+from .session_message import SessionMessage
 
 class OTBioelettronica400_Reader:
 
@@ -35,6 +38,8 @@ class OTBioelettronica400_Reader:
     def __init__(self):
 
         self.communication: bool = False
+        self.thread_out_messages: Queue = Queue()
+
         self.ConfString: list = []
 
         self.AnOutSource: int = 9  # Source input for analog output
@@ -215,6 +220,8 @@ class OTBioelettronica400_Reader:
             if (dt_end - dt_start).total_seconds() >= 1.0:
                 if (OTBioelettronica400_Reader.DEBUG_MODE):
                     print(f"Samples per second = {samples_streamed}, frames per second = {frame_count}")
+                
+                self.thread_out_messages.put(SessionMessage(f"Samples per second = {samples_streamed}, frames per second = {frame_count}"))
                 dt_start = dt_end
                 samples_streamed = 0
                 frame_count = 0
