@@ -34,6 +34,7 @@ class OTBioelettronica400_Reader:
 
     def __init__(self):
 
+        self.communication: bool = False
         self.ConfString: list = []
 
         self.AnOutSource: int = 9  # Source input for analog output
@@ -75,7 +76,7 @@ class OTBioelettronica400_Reader:
         self.tcpSocket.sendall(bytearray(self.ConfString))
 
         #Set the "communication" boolean flag to True, indicating that we are now receiving data
-        self.communication: bool = True
+        self.communication = True
 
         #Instantiate a thread to receive the data
         self.data_receiver_thread = threading.Thread(target=self._receive_data)
@@ -239,7 +240,7 @@ class OTBioelettronica400_Reader:
                     outlet.push_sample(new_data[i, :])
 
             except Exception as e:
-                print(f"An error occurred: {e}")
+                #print(f"An error occurred: {e}")
                 break
 
             #Pause for a small amount of time to give the computer
