@@ -3,3 +3,5 @@ src/hreflex_txbdc.egg-info/
 src/hreflex_txbdc/view/__pycache__/
 *.pyc
 src/otbio_lsl_sender.egg-info/
+build/
+dist/
