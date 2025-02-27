@@ -217,11 +217,10 @@ class OTBioelettronica400_Reader:
 
             #Keep track of some performance metrics
             dt_end = datetime.now()
-            if (dt_end - dt_start).total_seconds() >= 1.0:
+            if (dt_end - dt_start).total_seconds() >= 10.0:
                 if (OTBioelettronica400_Reader.DEBUG_MODE):
-                    print(f"Samples per second = {samples_streamed}, frames per second = {frame_count}")
-                
-                self.thread_out_messages.put(SessionMessage(f"Samples per second = {samples_streamed}, frames per second = {frame_count}"))
+                    print(f"Samples = {samples_streamed}, frames = {frame_count}")
+                self.thread_out_messages.put(SessionMessage(f"Samples = {samples_streamed}, frames = {frame_count}"))
                 dt_start = dt_end
                 samples_streamed = 0
                 frame_count = 0

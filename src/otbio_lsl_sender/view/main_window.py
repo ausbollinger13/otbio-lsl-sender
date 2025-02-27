@@ -43,7 +43,7 @@ class MainWindow(QMainWindow):
 
         # Set up window title and size
         self.setWindowTitle("TxBDC OTBioelettronica 400 LSL Sender")
-        self.resize(600, 400)  # Increased the width of the window
+        self.resize(900, 400)  # Increased the width of the window
 
         #Create some fonts that will be used for the ui elements
         self._regular_font: QFont = QFont("Arial", 12)
@@ -59,7 +59,7 @@ class MainWindow(QMainWindow):
         self._session_message_box = QPlainTextEdit()
         self._session_message_box.setFont(self._regular_font)
         self._session_message_box.setReadOnly(True)
-        self._session_message_box.setFixedWidth(550)
+        self._session_message_box.setFixedWidth(850)
 
         #Create a start/stop button
         self._start_stop_button = QPushButton("Start")
