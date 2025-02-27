@@ -39,7 +39,7 @@ class MainWindow(QMainWindow):
 
         #Initialize a timer
         self._background_timer: QTimer = QTimer()
-        self._background_timer.connect(self._check_background_thread_message_queue())
+        self._background_timer.timeout.connect(self._check_background_thread_message_queue)
 
         # Set up window title and size
         self.setWindowTitle("TxBDC OTBioelettronica 400 LSL Sender")
@@ -149,8 +149,10 @@ class MainWindow(QMainWindow):
     #region Private methods
 
     def _check_background_thread_message_queue (self) -> None:
-        self._session_messages.append(SessionMessage("Hello, World!"))
-        self._update_session_messages()
+        while not self._otbio_reader.thread_out_messages.empty():
+            msg: SessionMessage = self._otbio_reader.thread_out_messages.get()
+            self._session_messages.append(msg)
+            self._update_session_messages()
 
     def _update_session_messages (self) -> None:
         self._session_message_box.appendHtml(self._session_messages[-1].formatted_message_text)
