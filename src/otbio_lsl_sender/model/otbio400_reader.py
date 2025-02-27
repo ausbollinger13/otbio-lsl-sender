@@ -227,8 +227,20 @@ class OTBioelettronica400_Reader:
 
             try:
                 #Pull in the expected number of bytes
+                dt_recv_start: datetime = datetime.now()
+                recv_failed: bool = False
                 while len(buffer) < expected_bytes:
-                    buffer += self.tcpSocket.recv(expected_bytes - len(buffer))
+                    #The flag value of 0x40 makes this a non-blocking call
+                    buffer += self.tcpSocket.recv(expected_bytes - len(buffer), 0x40)
+
+                    dt_current: datetime = datetime.now()
+                    if ((dt_current - dt_recv_start).total_seconds() >= 10.0):
+                        recv_failed = True
+                        break
+                
+                if (recv_failed):
+                    self.thread_out_messages.put(SessionMessage(f"Warning: no data received from OTBio device!"))
+                    continue
 
                 #Extract the first N bytes, where N = expected_bytes. Place into the data variable.
                 samples_streamed += expected_bytes
@@ -246,7 +258,11 @@ class OTBioelettronica400_Reader:
                     outlet.push_sample(new_data[i, :])
 
             except Exception as e:
-                #print(f"An error occurred: {e}")
+                self.thread_out_messages.put(SessionMessage(f"Error in background thread: {e}"))
+                
+                if (OTBioelettronica400_Reader.DEBUG_MODE):
+                    print(f"An error occurred: {e}")
+                
                 break
 
             #Pause for a small amount of time to give the computer
