@@ -48,7 +48,7 @@ class OTBioelettronica400_Reader:
         self.Decim: int = 64
         
         self.SamplingFrequency: int = 5120
-        self.NumberOfChannels: int = 120
+        self.NumberOfChannels: int = 408
 
         self.SamplingFrequencyCode: int = OTBioelettronica400_Reader.SAMPLING_FREQUENCY_OPTIONS[self.SamplingFrequency]
         self.NumberOfChannelsCode: int = OTBioelettronica400_Reader.NUMBER_OF_CHANNEL_OPTIONS[self.NumberOfChannels]
