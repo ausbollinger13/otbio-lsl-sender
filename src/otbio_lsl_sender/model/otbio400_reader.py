@@ -7,6 +7,8 @@ from datetime import datetime
 from pylsl import StreamInfo, StreamOutlet, local_clock
 from queue import Queue
 
+import simpleaudio as sa
+
 from .session_message import SessionMessage
 
 class OTBioelettronica400_Reader:
@@ -57,6 +59,10 @@ class OTBioelettronica400_Reader:
         self.TCPPort: int = 23456
         self.GainFactor = 5 / 2**16 / 150 * 1000  # Provide amplitude in mV
         self.AuxGainFactor = 5 / 2**16 / 0.5      # Gain factor to convert Aux Channels in V
+
+        self.error_count: int = 0
+        self.first_error_time: datetime = datetime.min
+        self.most_recent_error_time: datetime = datetime.min
 
         pass
 
@@ -213,6 +219,8 @@ class OTBioelettronica400_Reader:
         dt_start: datetime = datetime.now()
         dt_end: datetime = dt_start
 
+        sound_the_alarm: bool = False
+
         #Loop infinitely
         while self.communication:
 
@@ -232,7 +240,11 @@ class OTBioelettronica400_Reader:
                 recv_failed: bool = False
                 while len(buffer) < expected_bytes:
                     #The flag value of 0x40 makes this a non-blocking call
-                    buffer += self.tcpSocket.recv(expected_bytes - len(buffer))
+                    try:
+                        buffer += self.tcpSocket.recv(expected_bytes - len(buffer))
+                    except Exception as e:
+                        print(f"An error occurred while reading data from the OTB system via the TCP socket.")
+                        raise
 
                     dt_current: datetime = datetime.now()
                     if ((dt_current - dt_recv_start).total_seconds() >= 10.0):
@@ -256,19 +268,43 @@ class OTBioelettronica400_Reader:
 
                 #Push the chunk to LSL
                 for i in range(0, data_length):
-                    outlet.push_sample(new_data[i, :])
+                    try:
+                        outlet.push_sample(new_data[i, :])
+                    except Exception as e:
+                        print(f"An error occurred while pushing data to the LSL stream.")
+                        raise
 
             except Exception as e:
                 self.thread_out_messages.put(SessionMessage(f"Error in background thread: {e}"))
                 
                 if (OTBioelettronica400_Reader.DEBUG_MODE):
                     print(f"An error occurred: {e}")
-                
-                break
+
+                self.error_count += 1
+                self.most_recent_error_time = datetime.now()
+                if (self.error_count == 1):
+                    self.first_error_time = self.most_recent_error_time
+                elif (self.error_count > 1):
+                    error_duration = self.most_recent_error_time - self.first_error_time
+                    if (error_duration.total_seconds() > 5.0):
+                        sound_the_alarm = True
+                        break
 
             #Pause for a small amount of time to give the computer
             #some breathing room
             time.sleep(0.033)
+        
+        if (sound_the_alarm):
+            wave_obj = sa.WaveObject.from_wave_file("./assets/loud-emergency-alarm-54635.wav")
+            play_count: int = 0
+            while(self.communication):
+                play_obj = wave_obj.play()
+                play_obj.wait_done()
+                play_count += 1
+
+                if (play_count > 100):
+                    break
+            pass
 
     #endregion
 
