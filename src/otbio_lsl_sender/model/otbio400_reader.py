@@ -98,13 +98,40 @@ class OTBioelettronica400_Reader:
         # Stop data transfer
         self.communication = False
 
-        # Stop data transfer command
-        self.ConfString[0] = int('10000000', 2)          # First byte that stops the data transfer
-        self.ConfString[39] = self._CRC8(self.ConfString, 39)  # Estimates the new CRC
-        self.tcpSocket.sendall(bytearray(self.ConfString))
+        try:
+            # Stop data transfer command
+            self.ConfString[0] = int('10000000', 2)          # First byte that stops the data transfer
+            self.ConfString[39] = self._CRC8(self.ConfString, 39)  # Estimates the new CRC
+            
+            # Check if socket is still connected before sending
+            if hasattr(self, 'tcpSocket') and self.tcpSocket:
+                self.tcpSocket.sendall(bytearray(self.ConfString))
+        except Exception as e:
+            # If socket is already disconnected, that's fine
+            print(f"Warning during stop communication: {e}")
 
         # Close the communication
-        self.tcpSocket.close()        
+        try:
+            if hasattr(self, 'tcpSocket') and self.tcpSocket:
+                self.tcpSocket.close()
+        except Exception as e:
+            print(f"Warning during socket close: {e}")
+        
+        # Wait for data receiver thread to finish
+        if hasattr(self, 'data_receiver_thread') and self.data_receiver_thread.is_alive():
+            self.data_receiver_thread.join(timeout=5.0)  # Wait up to 5 seconds
+
+    def _is_socket_connected(self) -> bool:
+        """Check if the TCP socket is still connected"""
+        try:
+            if not hasattr(self, 'tcpSocket') or not self.tcpSocket:
+                return False
+            
+            # Try to send a zero-length message to check connection
+            self.tcpSocket.send(b'', socket.MSG_DONTWAIT)
+            return True
+        except (socket.error, AttributeError):
+            return False        
 
     #endregion
 
@@ -220,6 +247,8 @@ class OTBioelettronica400_Reader:
         dt_end: datetime = dt_start
 
         sound_the_alarm: bool = False
+        consecutive_errors: int = 0
+        max_consecutive_errors: int = 5
 
         #Loop infinitely
         while self.communication:
@@ -238,22 +267,60 @@ class OTBioelettronica400_Reader:
                 #Pull in the expected number of bytes
                 dt_recv_start: datetime = datetime.now()
                 recv_failed: bool = False
-                while len(buffer) < expected_bytes:
-                    #The flag value of 0x40 makes this a non-blocking call
+                
+                while len(buffer) < expected_bytes and self.communication:
                     try:
-                        buffer += self.tcpSocket.recv(expected_bytes - len(buffer))
+                        # Check if socket is still connected
+                        remaining_bytes = expected_bytes - len(buffer)
+                        data_chunk = self.tcpSocket.recv(remaining_bytes)
+                        
+                        if not data_chunk:
+                            # Socket was closed on the other end
+                            raise ConnectionError("Socket connection closed by device")
+                            
+                        buffer += data_chunk
+                        
+                    except socket.timeout:
+                        # Handle timeout gracefully - this is expected occasionally
+                        if (OTBioelettronica400_Reader.DEBUG_MODE):
+                            print("Socket timeout occurred, retrying...")
+                        continue
+                        
+                    except (ConnectionError, ConnectionResetError, BrokenPipeError) as conn_err:
+                        # Network connection issues
+                        self.thread_out_messages.put(SessionMessage(f"Connection error: {conn_err}"))
+                        recv_failed = True
+                        break
+                        
                     except Exception as e:
-                        print(f"An error occurred while reading data from the OTB system via the TCP socket.")
-                        raise
+                        # Other socket errors
+                        self.thread_out_messages.put(SessionMessage(f"Socket error: {e}"))
+                        recv_failed = True
+                        break
 
                     dt_current: datetime = datetime.now()
-                    if ((dt_current - dt_recv_start).total_seconds() >= 10.0):
+                    if ((dt_current - dt_recv_start).total_seconds() >= 15.0):  # Increased timeout
                         recv_failed = True
                         break
                 
                 if (recv_failed):
-                    self.thread_out_messages.put(SessionMessage(f"Warning: no data received from OTBio device!"))
+                    consecutive_errors += 1
+                    self.thread_out_messages.put(SessionMessage(f"Warning: no data received from OTBio device! (Attempt {consecutive_errors}/{max_consecutive_errors})"))
+                    
+                    # Clear corrupted buffer
+                    buffer = b''
+                    
+                    if consecutive_errors >= max_consecutive_errors:
+                        self.thread_out_messages.put(SessionMessage(f"Too many consecutive errors ({consecutive_errors}), stopping stream"))
+                        sound_the_alarm = True
+                        break
+                    
+                    # Brief pause before retry
+                    time.sleep(0.1)
                     continue
+                
+                # Reset consecutive error counter on successful data reception
+                consecutive_errors = 0
 
                 #Extract the first N bytes, where N = expected_bytes. Place into the data variable.
                 samples_streamed += expected_bytes
@@ -263,19 +330,27 @@ class OTBioelettronica400_Reader:
                 buffer = buffer[expected_bytes:]
 
                 #Reshape the data array based on the number of channels we are using
-                new_data = np.frombuffer(data, dtype=np.int16).reshape(int(self.SamplingFrequency / OTBioelettronica400_Reader.FRAMES_PER_SECOND), self.NumberOfChannels)
-                data_length = new_data.shape[0]
+                try:
+                    new_data = np.frombuffer(data, dtype=np.int16).reshape(int(self.SamplingFrequency / OTBioelettronica400_Reader.FRAMES_PER_SECOND), self.NumberOfChannels)
+                    data_length = new_data.shape[0]
+                except ValueError as ve:
+                    self.thread_out_messages.put(SessionMessage(f"Data reshape error: {ve}. Buffer may be corrupted."))
+                    # Clear corrupted buffer and continue
+                    buffer = b''
+                    continue
 
                 #Push the chunk to LSL
                 for i in range(0, data_length):
                     try:
                         outlet.push_sample(new_data[i, :])
                     except Exception as e:
-                        print(f"An error occurred while pushing data to the LSL stream.")
-                        raise
+                        self.thread_out_messages.put(SessionMessage(f"LSL push error: {e}"))
+                        # Don't break on LSL errors, just log and continue
+                        break
 
             except Exception as e:
-                self.thread_out_messages.put(SessionMessage(f"Error in background thread: {e}"))
+                consecutive_errors += 1
+                self.thread_out_messages.put(SessionMessage(f"Error in background thread: {e} (Attempt {consecutive_errors}/{max_consecutive_errors})"))
                 
                 if (OTBioelettronica400_Reader.DEBUG_MODE):
                     print(f"An error occurred: {e}")
@@ -284,11 +359,18 @@ class OTBioelettronica400_Reader:
                 self.most_recent_error_time = datetime.now()
                 if (self.error_count == 1):
                     self.first_error_time = self.most_recent_error_time
-                elif (self.error_count > 1):
-                    error_duration = self.most_recent_error_time - self.first_error_time
-                    if (error_duration.total_seconds() > 5.0):
-                        sound_the_alarm = True
-                        break
+                
+                # Clear potentially corrupted buffer
+                buffer = b''
+                
+                # Check if we should stop due to too many consecutive errors
+                if consecutive_errors >= max_consecutive_errors:
+                    self.thread_out_messages.put(SessionMessage(f"Too many consecutive errors ({consecutive_errors}), stopping stream"))
+                    sound_the_alarm = True
+                    break
+                
+                # Brief pause before retry
+                time.sleep(0.1)
 
             #Pause for a small amount of time to give the computer
             #some breathing room
