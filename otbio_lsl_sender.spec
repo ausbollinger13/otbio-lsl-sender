@@ -2,15 +2,15 @@
 
 
 a = Analysis(
-    ['scripts\\main.py'],
+    ['C:\\Users\\labadmin\\Box\\Python\\Projects\\otbio_lsl_sender\\scripts\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets')],
-    hiddenimports=['pylsl', 'simpleaudio', 'numpy', 'PySide6.QtCore', 'PySide6.QtWidgets', 'PySide6.QtGui'],
+    datas=[('C:\\Users\\labadmin\\Box\\Python\\Projects\\otbio_lsl_sender\\assets', 'assets'), ('C:\\Users\\labadmin\\Box\\Python\\Projects\\otbio_lsl_sender\\src\\otbio_lsl_sender', 'otbio_lsl_sender')],
+    hiddenimports=['PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets', 'pylsl', 'numpy', 'simpleaudio'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['matplotlib', 'scipy', 'pandas'],
     noarchive=False,
     optimize=0,
 )
@@ -29,7 +29,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # Set to False for windowed application
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

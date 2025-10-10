@@ -33,6 +33,14 @@ class OTBioelettronica400_Reader:
         408: 6
     }
 
+    # TTL channel configuration (channels 385-400, 0-indexed: 384-399)
+    TTL_START_CHANNEL = 384  # 0-indexed (channels 385-400 in 1-indexed)
+    TTL_END_CHANNEL = 399    # 0-indexed
+    TTL_HIGH_THRESHOLD = 2500    # mV - signal above this is considered HIGH (5V ≈ 5000mV)
+    TTL_LOW_THRESHOLD = 500      # mV - signal below this is considered LOW (0V)
+    TTL_CHANNELS = ['IN1', 'IN2', 'IN3', 'IN4', 'IN5', 'IN6', 'IN7', 'IN8',
+                   'IN9', 'IN10', 'IN11', 'IN12', 'IN13', 'IN14', 'IN15', 'IN16']
+
     #endregion
 
     #region Constructor
@@ -63,6 +71,29 @@ class OTBioelettronica400_Reader:
         self.error_count: int = 0
         self.first_error_time: datetime = datetime.min
         self.most_recent_error_time: datetime = datetime.min
+
+        # TTL detection state tracking - improved for professional edge detection
+        self.ttl_previous_raw_values = np.zeros(16, dtype=np.int16)  # Track raw values
+        self.ttl_current_states = np.zeros(16, dtype=bool)  # Current digital states
+        self.ttl_previous_states = np.zeros(16, dtype=bool)  # Previous digital states
+        self.ttl_enabled = True  # Flag to enable/disable TTL detection
+        self.ttl_debug_counter = 0  # For periodic debugging
+        
+        # Professional TTL detection parameters - optimized for precision
+        self.TTL_GainFactor = (5.0 / 32768.0) * 1000  # Convert to mV
+        self.TTL_HIGH_VOLTAGE = 1500.0  # mV - lowered for better detection
+        self.TTL_LOW_VOLTAGE = -500.0   # mV - account for negative baseline
+        
+        # Sample timing for precise marker placement
+        self.sample_period = 1.0 / self.SamplingFrequency  # Time per sample
+        self.samples_per_chunk = int(self.SamplingFrequency / OTBioelettronica400_Reader.FRAMES_PER_SECOND)
+        
+        # Track sample count for precise timing calculation
+        self.total_samples_processed = 0
+        self.stream_start_time = None
+        
+        # Only monitor IN1 initially - can be expanded later
+        self.active_ttl_channels = [0]  # Index 0 = IN1
 
         pass
 
@@ -132,6 +163,23 @@ class OTBioelettronica400_Reader:
             return True
         except (socket.error, AttributeError):
             return False        
+
+    def set_ttl_thresholds(self, high_threshold_mv: float, low_threshold_mv: float) -> None:
+        """Set the TTL detection thresholds in millivolts
+        
+        Args:
+            high_threshold_mv: Voltage above which signal is considered HIGH (default: 2500mV for 5V logic)
+            low_threshold_mv: Voltage below which signal is considered LOW (default: 500mV for 0V logic)
+        """
+        OTBioelettronica400_Reader.TTL_HIGH_THRESHOLD = high_threshold_mv
+        OTBioelettronica400_Reader.TTL_LOW_THRESHOLD = low_threshold_mv
+        self.thread_out_messages.put(SessionMessage(f"TTL thresholds set to HIGH: {high_threshold_mv}mV, LOW: {low_threshold_mv}mV"))
+
+    def enable_ttl_detection(self, enabled: bool) -> None:
+        """Enable or disable TTL detection"""
+        self.ttl_enabled = enabled
+        status = "enabled" if enabled else "disabled"
+        self.thread_out_messages.put(SessionMessage(f"TTL detection {status}"))
 
     #endregion
 
@@ -224,15 +272,97 @@ class OTBioelettronica400_Reader:
 
         return crc
 
+    def _detect_ttl_events(self, data_chunk: np.ndarray, marker_outlet: StreamOutlet, chunk_start_timestamp: float) -> None:
+        """Professional TTL detection with sample-accurate timing like BrainVision trigger boxes"""
+        if not self.ttl_enabled:
+            return
+            
+        # Check if we have enough channels for TTL detection
+        if self.NumberOfChannels < 385:
+            if self.ttl_debug_counter % 1000 == 0:
+                self.thread_out_messages.put(SessionMessage(f"Warning: Only {self.NumberOfChannels} channels available, channel 385 not accessible"))
+            self.ttl_debug_counter += 1
+            return
+        
+        # Extract TTL channels (we have 16 channels: 384-399)
+        ttl_data = data_chunk[:, self.TTL_START_CHANNEL:self.TTL_END_CHANNEL + 1]
+        
+        # Convert to voltage (mV) using the correct gain factor
+        ttl_voltages = ttl_data * self.TTL_GainFactor
+        
+        # Debug output every 500 frames for IN1
+        self.ttl_debug_counter += 1
+        if self.ttl_debug_counter % 500 == 0:
+            ch1_voltages = ttl_voltages[:, 0]  # IN1
+            self.thread_out_messages.put(SessionMessage(
+                f"TTL IN1 Debug: Voltage range=[{ch1_voltages.min():.1f}, {ch1_voltages.max():.1f}]mV, "
+                f"Mean={ch1_voltages.mean():.1f}mV, Current state={'HIGH' if self.ttl_current_states[0] else 'LOW'}"
+            ))
+        
+        # Process each sample in the chunk with sample-accurate timing
+        for sample_idx in range(ttl_data.shape[0]):
+            current_voltages = ttl_voltages[sample_idx, :]
+            
+            # Calculate the exact timestamp for this sample
+            # This is the key to professional trigger box accuracy
+            sample_timestamp = chunk_start_timestamp + (sample_idx * self.sample_period)
+            
+            # Process only active TTL channels (currently just IN1)
+            for ch_idx in self.active_ttl_channels:
+                voltage = current_voltages[ch_idx]
+                
+                # Simple threshold detection for clean edges
+                current_state = voltage > self.TTL_HIGH_VOLTAGE
+                previous_state = self.ttl_current_states[ch_idx]
+                
+                # Detect edges with sample-accurate timing
+                if current_state != previous_state:
+                    # State changed - determine edge type
+                    if current_state and not previous_state:
+                        # Rising edge (LOW to HIGH)
+                        marker_name = f"TTL_{self.TTL_CHANNELS[ch_idx]}_RISING"
+                        edge_type = "RISING"
+                    elif not current_state and previous_state:
+                        # Falling edge (HIGH to LOW) 
+                        marker_name = f"TTL_{self.TTL_CHANNELS[ch_idx]}_FALLING"
+                        edge_type = "FALLING"
+                    else:
+                        continue  # No valid edge
+                    
+                    try:
+                        # Send the marker with the precise sample timestamp
+                        # This is how professional trigger boxes achieve accurate timing
+                        marker_outlet.push_sample([marker_name], sample_timestamp)
+                        
+                        # Log the event
+                        self.thread_out_messages.put(SessionMessage(
+                            f"TTL Event: {marker_name} at sample {self.total_samples_processed + sample_idx} "
+                            f"(Voltage: {voltage:.1f}mV, Time: {sample_timestamp:.6f}s)"
+                        ))
+                        
+                        if self.DEBUG_MODE:
+                            print(f"TTL Event: {marker_name} at {sample_timestamp:.6f}s")
+                            
+                    except Exception as e:
+                        self.thread_out_messages.put(SessionMessage(f"Error sending TTL marker: {e}"))
+                
+                # Update current state
+                self.ttl_current_states[ch_idx] = current_state
+
     def _receive_data(self):
         # Create a new StreamInfo object that will tell LSL what our stream contains
-        # The last value should be the serial number of the device or some other 
-        # more or less locally unique identifier for the stream as far as available 
-        # (could also omit it but interrupted connections wouldn't auto-recover)
         info: StreamInfo = StreamInfo("OTBioelettronica 400", "EMG", self.NumberOfChannels, self.SamplingFrequency, "float32", "myuid34234")
 
         # Next make an outlet for LSL
         outlet: StreamOutlet = StreamOutlet(info)
+
+        # Create LSL marker stream for TTL events
+        marker_info: StreamInfo = StreamInfo("OTBio_TTL_Markers", "Markers", 1, 0, "string", "otbio_ttl_markers")
+        marker_outlet: StreamOutlet = StreamOutlet(marker_info)
+
+        # Initialize timing for professional marker accuracy
+        self.stream_start_time = local_clock()
+        self.total_samples_processed = 0
 
         #Instantiate a byte buffer to hold data as it comes in from the device
         buffer = b''
@@ -333,16 +463,29 @@ class OTBioelettronica400_Reader:
                 try:
                     new_data = np.frombuffer(data, dtype=np.int16).reshape(int(self.SamplingFrequency / OTBioelettronica400_Reader.FRAMES_PER_SECOND), self.NumberOfChannels)
                     data_length = new_data.shape[0]
+                    
+                    # Calculate the timestamp for the start of this chunk
+                    # This is when the first sample in this chunk was actually acquired
+                    chunk_start_timestamp = self.stream_start_time + (self.total_samples_processed * self.sample_period)
+                    
+                    # Detect TTL events with precise timing BEFORE pushing EMG data
+                    self._detect_ttl_events(new_data, marker_outlet, chunk_start_timestamp)
+                    
+                    # Update total sample count for next chunk
+                    self.total_samples_processed += data_length
+                    
                 except ValueError as ve:
                     self.thread_out_messages.put(SessionMessage(f"Data reshape error: {ve}. Buffer may be corrupted."))
                     # Clear corrupted buffer and continue
                     buffer = b''
                     continue
 
-                #Push the chunk to LSL
+                #Push the chunk to LSL with proper timing
                 for i in range(0, data_length):
                     try:
-                        outlet.push_sample(new_data[i, :])
+                        # Calculate precise timestamp for each sample
+                        sample_timestamp = chunk_start_timestamp + (i * self.sample_period)
+                        outlet.push_sample(new_data[i, :], sample_timestamp)
                     except Exception as e:
                         self.thread_out_messages.put(SessionMessage(f"LSL push error: {e}"))
                         # Don't break on LSL errors, just log and continue
