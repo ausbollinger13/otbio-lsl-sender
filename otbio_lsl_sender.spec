@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['C:\\Users\\labadmin\\Box\\Python\\Projects\\otbio_lsl_sender\\scripts\\main.py'],
+    ['C:\\Users\\axb240058\\Box\\Python\\Projects\\otbio_lsl_sender\\scripts\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[('C:\\Users\\labadmin\\Box\\Python\\Projects\\otbio_lsl_sender\\assets', 'assets'), ('C:\\Users\\labadmin\\Box\\Python\\Projects\\otbio_lsl_sender\\src\\otbio_lsl_sender', 'otbio_lsl_sender')],
-    hiddenimports=['PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets', 'pylsl', 'numpy', 'simpleaudio'],
+    datas=[('C:\\Users\\axb240058\\Box\\Python\\Projects\\otbio_lsl_sender\\assets', 'assets'), ('C:\\Users\\axb240058\\Box\\Python\\Projects\\otbio_lsl_sender\\src\\otbio_lsl_sender', 'otbio_lsl_sender')],
+    hiddenimports=['PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets', 'pylsl', 'numpy', 'pygame'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
