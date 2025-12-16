@@ -7,7 +7,7 @@ from datetime import datetime
 from pylsl import StreamInfo, StreamOutlet, local_clock
 from queue import Queue
 
-import simpleaudio as sa
+import pygame
 
 from .session_message import SessionMessage
 
@@ -480,16 +480,14 @@ class OTBioelettronica400_Reader:
                     buffer = b''
                     continue
 
-                #Push the chunk to LSL with proper timing
-                for i in range(0, data_length):
-                    try:
-                        # Calculate precise timestamp for each sample
-                        sample_timestamp = chunk_start_timestamp + (i * self.sample_period)
-                        outlet.push_sample(new_data[i, :], sample_timestamp)
-                    except Exception as e:
-                        self.thread_out_messages.put(SessionMessage(f"LSL push error: {e}"))
-                        # Don't break on LSL errors, just log and continue
-                        break
+                #Push the chunk to LSL with proper timing - use push_chunk for better performance
+                try:
+                    # push_chunk is much faster than looping with push_sample
+                    # The timestamp is for the first sample; LSL automatically timestamps subsequent samples
+                    outlet.push_chunk(new_data.tolist(), chunk_start_timestamp)
+                except Exception as e:
+                    self.thread_out_messages.put(SessionMessage(f"LSL push error: {e}"))
+                    # Don't break on LSL errors, just log and continue
 
             except Exception as e:
                 consecutive_errors += 1
@@ -514,21 +512,20 @@ class OTBioelettronica400_Reader:
                 
                 # Brief pause before retry
                 time.sleep(0.1)
-
-            #Pause for a small amount of time to give the computer
-            #some breathing room
-            time.sleep(0.033)
         
         if (sound_the_alarm):
-            wave_obj = sa.WaveObject.from_wave_file("./assets/loud-emergency-alarm-54635.wav")
+            pygame.mixer.init()
+            pygame.mixer.music.load("./assets/loud-emergency-alarm-54635.wav")
             play_count: int = 0
             while(self.communication):
-                play_obj = wave_obj.play()
-                play_obj.wait_done()
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    pygame.time.Clock().tick(10)
                 play_count += 1
 
                 if (play_count > 100):
                     break
+            pygame.mixer.quit()
             pass
 
     #endregion
