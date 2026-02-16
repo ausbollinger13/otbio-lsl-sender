@@ -17,7 +17,12 @@ class OTBioelettronica400_Reader:
 
     DEBUG_MODE: bool = False
 
-    FRAMES_PER_SECOND = 16
+    # CRITICAL FOR TTL LATENCY: Higher FPS = smaller chunks = lower latency
+    # At 5120 Hz: 16 FPS = 320 samples/chunk = 62.5ms max latency
+    #             32 FPS = 160 samples/chunk = 31.25ms max latency  
+    #             64 FPS = 80 samples/chunk = 15.6ms max latency
+    # Trade-off: Higher FPS increases CPU/network overhead slightly
+    FRAMES_PER_SECOND = 128  # Increased from 16 to minimize TTL latency
 
     SAMPLING_FREQUENCY_OPTIONS: dict[int, int] = {
         512: 0,
@@ -36,10 +41,14 @@ class OTBioelettronica400_Reader:
     # TTL channel configuration (channels 385-400, 0-indexed: 384-399)
     TTL_START_CHANNEL = 384  # 0-indexed (channels 385-400 in 1-indexed)
     TTL_END_CHANNEL = 399    # 0-indexed
-    TTL_HIGH_THRESHOLD = 2500    # mV - signal above this is considered HIGH (5V ≈ 5000mV)
-    TTL_LOW_THRESHOLD = 500      # mV - signal below this is considered LOW (0V)
+    TTL_HIGH_THRESHOLD = 1000    # mV - signal above this is considered HIGH (5V ≈ 5000mV)
+    TTL_LOW_THRESHOLD = 100      # mV - signal below this is considered LOW (0V)
     TTL_CHANNELS = ['IN1', 'IN2', 'IN3', 'IN4', 'IN5', 'IN6', 'IN7', 'IN8',
                    'IN9', 'IN10', 'IN11', 'IN12', 'IN13', 'IN14', 'IN15', 'IN16']
+    
+    # Latency compensation: estimate of network + processing delay in seconds
+    # Adjust this based on your system's actual latency measurements
+    TTL_LATENCY_COMPENSATION = 0.000  # seconds (0ms default, tune as needed)
 
     #endregion
 
@@ -180,6 +189,27 @@ class OTBioelettronica400_Reader:
         self.ttl_enabled = enabled
         status = "enabled" if enabled else "disabled"
         self.thread_out_messages.put(SessionMessage(f"TTL detection {status}"))
+    
+    def set_ttl_latency_compensation(self, latency_ms: float) -> None:
+        """Set latency compensation for TTL markers
+        
+        Args:
+            latency_ms: Latency in milliseconds to subtract from marker timestamps
+                       Positive values shift markers earlier in time
+                       Use this to compensate for network/processing delays
+        """
+        OTBioelettronica400_Reader.TTL_LATENCY_COMPENSATION = latency_ms / 1000.0
+        self.thread_out_messages.put(SessionMessage(f"TTL latency compensation set to {latency_ms:.2f}ms"))
+    
+    def get_ttl_chunk_latency_ms(self) -> float:
+        """Get the maximum latency introduced by chunk-based processing
+        
+        Returns:
+            Maximum latency in milliseconds (depends on chunk size)
+        """
+        chunk_size = self.SamplingFrequency / OTBioelettronica400_Reader.FRAMES_PER_SECOND
+        max_latency_ms = (chunk_size / self.SamplingFrequency) * 1000
+        return max_latency_ms
 
     #endregion
 
@@ -272,8 +302,20 @@ class OTBioelettronica400_Reader:
 
         return crc
 
-    def _detect_ttl_events(self, data_chunk: np.ndarray, marker_outlet: StreamOutlet, chunk_start_timestamp: float) -> None:
-        """Professional TTL detection with sample-accurate timing like BrainVision trigger boxes"""
+    def _detect_ttl_events(self, data_chunk: np.ndarray, marker_outlet: StreamOutlet, chunk_timestamp: float) -> None:
+        """TTL detection synchronized with EMG data stream using LSL backwards timestamping
+        
+        CRITICAL for synchronization (LSL best practice):
+        - chunk_timestamp represents when the FIRST sample occurred (calculated backwards from 'now')
+        - Each sample's timestamp is: chunk_timestamp + (sample_idx / sampling_rate)
+        - LSL will assign identical timestamps when push_chunk is called with the same chunk_timestamp
+        - This "backwards timestamping" approach eliminates network jitter for maximum accuracy
+        
+        Args:
+            data_chunk: The data chunk containing TTL channels
+            marker_outlet: LSL outlet for sending TTL markers
+            chunk_timestamp: Calculated timestamp for the first sample in the chunk
+        """
         if not self.ttl_enabled:
             return
             
@@ -299,13 +341,17 @@ class OTBioelettronica400_Reader:
                 f"Mean={ch1_voltages.mean():.1f}mV, Current state={'HIGH' if self.ttl_current_states[0] else 'LOW'}"
             ))
         
-        # Process each sample in the chunk with sample-accurate timing
+        # Process each sample in the chunk
         for sample_idx in range(ttl_data.shape[0]):
             current_voltages = ttl_voltages[sample_idx, :]
             
-            # Calculate the exact timestamp for this sample
-            # This is the key to professional trigger box accuracy
-            sample_timestamp = chunk_start_timestamp + (sample_idx * self.sample_period)
+            # CRITICAL: Use EXACT same timestamp calculation as LSL does internally
+            # When push_chunk is called with chunk_timestamp, LSL assigns:
+            #   Sample 0: chunk_timestamp
+            #   Sample 1: chunk_timestamp + (1 / sampling_rate)
+            #   Sample N: chunk_timestamp + (N / sampling_rate)
+            # We must use the identical formula for perfect synchronization
+            sample_timestamp = chunk_timestamp + (sample_idx / self.SamplingFrequency)
             
             # Process only active TTL channels (currently just IN1)
             for ch_idx in self.active_ttl_channels:
@@ -330,8 +376,7 @@ class OTBioelettronica400_Reader:
                         continue  # No valid edge
                     
                     try:
-                        # Send the marker with the precise sample timestamp
-                        # This is how professional trigger boxes achieve accurate timing
+                        # Send the marker with timestamp synchronized to EMG stream
                         marker_outlet.push_sample([marker_name], sample_timestamp)
                         
                         # Log the event
@@ -464,14 +509,21 @@ class OTBioelettronica400_Reader:
                     new_data = np.frombuffer(data, dtype=np.int16).reshape(int(self.SamplingFrequency / OTBioelettronica400_Reader.FRAMES_PER_SECOND), self.NumberOfChannels)
                     data_length = new_data.shape[0]
                     
-                    # Calculate the timestamp for the start of this chunk
-                    # This is when the first sample in this chunk was actually acquired
-                    chunk_start_timestamp = self.stream_start_time + (self.total_samples_processed * self.sample_period)
+                    # LSL BEST PRACTICE for minimal jitter: "Backwards timestamping"
+                    # Get timestamp NOW (when we're about to push) - this represents the last sample
+                    # Then calculate backwards to find when the first sample occurred
+                    # This eliminates network jitter since we timestamp from a stable reference point
+                    now = local_clock()
                     
-                    # Detect TTL events with precise timing BEFORE pushing EMG data
-                    self._detect_ttl_events(new_data, marker_outlet, chunk_start_timestamp)
+                    # Calculate when the FIRST sample in this chunk occurred
+                    # If we have N samples, the first one was (N-1) / fs seconds ago
+                    chunk_timestamp = now - ((data_length - 1) / self.SamplingFrequency)
                     
-                    # Update total sample count for next chunk
+                    # Detect TTL events using the calculated chunk start time
+                    # Each sample's exact timestamp will be: chunk_timestamp + (sample_idx / fs)
+                    self._detect_ttl_events(new_data, marker_outlet, chunk_timestamp)
+                    
+                    # Update total sample count for tracking
                     self.total_samples_processed += data_length
                     
                 except ValueError as ve:
@@ -482,9 +534,11 @@ class OTBioelettronica400_Reader:
 
                 #Push the chunk to LSL with proper timing - use push_chunk for better performance
                 try:
-                    # push_chunk is much faster than looping with push_sample
-                    # The timestamp is for the first sample; LSL automatically timestamps subsequent samples
-                    outlet.push_chunk(new_data.tolist(), chunk_start_timestamp)
+                    # LSL BEST PRACTICE: Push chunk with backwards-calculated timestamp
+                    # chunk_timestamp was calculated as: now - (num_samples - 1) / sampling_rate
+                    # This ensures the timestamp is stable and free from network jitter
+                    # LSL will timestamp each sample as: chunk_timestamp + sample_idx / sampling_rate
+                    outlet.push_chunk(new_data.tolist(), chunk_timestamp)
                 except Exception as e:
                     self.thread_out_messages.put(SessionMessage(f"LSL push error: {e}"))
                     # Don't break on LSL errors, just log and continue
