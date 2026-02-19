@@ -21,8 +21,10 @@ class OTBioelettronica400_Reader:
     # At 5120 Hz: 16 FPS = 320 samples/chunk = 62.5ms max latency
     #             32 FPS = 160 samples/chunk = 31.25ms max latency  
     #             64 FPS = 80 samples/chunk = 15.6ms max latency
+    #            128 FPS = 40 samples/chunk = 7.8ms max latency
+    #            256 FPS = 20 samples/chunk = 3.9ms max latency
     # Trade-off: Higher FPS increases CPU/network overhead slightly
-    FRAMES_PER_SECOND = 128  # Increased from 16 to minimize TTL latency
+    FRAMES_PER_SECOND = 512  # Optimized for minimal TTL marker jitter
 
     SAMPLING_FREQUENCY_OPTIONS: dict[int, int] = {
         512: 0,
@@ -114,10 +116,11 @@ class OTBioelettronica400_Reader:
         #Create the command that we will send to the OtBioelettronica device
         self._CreateCommand()
 
-        # Open the TCP socket
+        # Open the TCP socket with optimized settings for low latency
         self.tcpSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.tcpSocket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # Disable Nagle's algorithm for lower latency
         self.tcpSocket.connect((self.IpAddress, self.TCPPort))
-        self.tcpSocket.settimeout(5)
+        self.tcpSocket.settimeout(0.5)  # Short timeout to prevent blocking delays
 
         # Send the configuration to Quattrocento
         self.tcpSocket.sendall(bytearray(self.ConfString))
@@ -332,15 +335,6 @@ class OTBioelettronica400_Reader:
         # Convert to voltage (mV) using the correct gain factor
         ttl_voltages = ttl_data * self.TTL_GainFactor
         
-        # Debug output every 500 frames for IN1
-        self.ttl_debug_counter += 1
-        if self.ttl_debug_counter % 500 == 0:
-            ch1_voltages = ttl_voltages[:, 0]  # IN1
-            self.thread_out_messages.put(SessionMessage(
-                f"TTL IN1 Debug: Voltage range=[{ch1_voltages.min():.1f}, {ch1_voltages.max():.1f}]mV, "
-                f"Mean={ch1_voltages.mean():.1f}mV, Current state={'HIGH' if self.ttl_current_states[0] else 'LOW'}"
-            ))
-        
         # Process each sample in the chunk
         for sample_idx in range(ttl_data.shape[0]):
             current_voltages = ttl_voltages[sample_idx, :]
@@ -379,13 +373,12 @@ class OTBioelettronica400_Reader:
                         # Send the marker with timestamp synchronized to EMG stream
                         marker_outlet.push_sample([marker_name], sample_timestamp)
                         
-                        # Log the event
-                        self.thread_out_messages.put(SessionMessage(
-                            f"TTL Event: {marker_name} at sample {self.total_samples_processed + sample_idx} "
-                            f"(Voltage: {voltage:.1f}mV, Time: {sample_timestamp:.6f}s)"
-                        ))
-                        
+                        # Log the event only in DEBUG_MODE to prevent queue blocking
                         if self.DEBUG_MODE:
+                            self.thread_out_messages.put(SessionMessage(
+                                f"TTL Event: {marker_name} at sample {self.total_samples_processed + sample_idx} "
+                                f"(Voltage: {voltage:.1f}mV, Time: {sample_timestamp:.6f}s)"
+                            ))
                             print(f"TTL Event: {marker_name} at {sample_timestamp:.6f}s")
                             
                     except Exception as e:
@@ -474,7 +467,7 @@ class OTBioelettronica400_Reader:
                         break
 
                     dt_current: datetime = datetime.now()
-                    if ((dt_current - dt_recv_start).total_seconds() >= 15.0):  # Increased timeout
+                    if ((dt_current - dt_recv_start).total_seconds() >= 2.0):  # Reduced timeout for faster recovery
                         recv_failed = True
                         break
                 
@@ -509,22 +502,17 @@ class OTBioelettronica400_Reader:
                     new_data = np.frombuffer(data, dtype=np.int16).reshape(int(self.SamplingFrequency / OTBioelettronica400_Reader.FRAMES_PER_SECOND), self.NumberOfChannels)
                     data_length = new_data.shape[0]
                     
-                    # LSL BEST PRACTICE for minimal jitter: "Backwards timestamping"
-                    # Get timestamp NOW (when we're about to push) - this represents the last sample
-                    # Then calculate backwards to find when the first sample occurred
-                    # This eliminates network jitter since we timestamp from a stable reference point
-                    now = local_clock()
-                    
-                    # Calculate when the FIRST sample in this chunk occurred
-                    # If we have N samples, the first one was (N-1) / fs seconds ago
-                    chunk_timestamp = now - ((data_length - 1) / self.SamplingFrequency)
-                    
-                    # Detect TTL events using the calculated chunk start time
-                    # Each sample's exact timestamp will be: chunk_timestamp + (sample_idx / fs)
-                    self._detect_ttl_events(new_data, marker_outlet, chunk_timestamp)
-                    
-                    # Update total sample count for tracking
-                    self.total_samples_processed += data_length
+                    # SAMPLE-COUNTER BASED TIMESTAMPING: immune to GIL/OS scheduling jitter
+                    # Using local_clock() + backwards subtraction fails when the thread is preempted
+                    # by the OS for tens/hundreds of ms (common on Windows ~10% of iterations),
+                    # because data sits in the socket buffer but local_clock() reflects the late
+                    # wake-up time. The backwards compensation only subtracts the tiny chunk duration
+                    # (~1.8ms), not the actual buffering delay.
+                    #
+                    # Instead, timestamps are derived from how many samples have been processed,
+                    # which is deterministic and independent of thread scheduling:
+                    #   first sample of this chunk = stream_start_time + total_samples_processed / fs
+                    chunk_timestamp = self.stream_start_time + (self.total_samples_processed / self.SamplingFrequency)
                     
                 except ValueError as ve:
                     self.thread_out_messages.put(SessionMessage(f"Data reshape error: {ve}. Buffer may be corrupted."))
@@ -532,11 +520,20 @@ class OTBioelettronica400_Reader:
                     buffer = b''
                     continue
 
-                #Push the chunk to LSL with proper timing - use push_chunk for better performance
+                # CRITICAL: Detect and push TTL markers FIRST, before EMG data
+                # This minimizes jitter by eliminating processing delay between timestamp calculation and marker push
                 try:
-                    # LSL BEST PRACTICE: Push chunk with backwards-calculated timestamp
-                    # chunk_timestamp was calculated as: now - (num_samples - 1) / sampling_rate
-                    # This ensures the timestamp is stable and free from network jitter
+                    self._detect_ttl_events(new_data, marker_outlet, chunk_timestamp)
+                    
+                    # Update total sample count for tracking
+                    self.total_samples_processed += data_length
+                except Exception as e:
+                    self.thread_out_messages.put(SessionMessage(f"TTL detection error: {e}"))
+                    # Continue even if TTL detection fails
+
+                # Push the EMG chunk to LSL with proper timing - use push_chunk for better performance
+                try:
+                    # Sample-counter timestamp: chunk_timestamp = stream_start_time + total_samples_processed / fs
                     # LSL will timestamp each sample as: chunk_timestamp + sample_idx / sampling_rate
                     outlet.push_chunk(new_data.tolist(), chunk_timestamp)
                 except Exception as e:
