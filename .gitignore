@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller output
+build/
+dist/
+
+# Editors
+.vscode/
+.idea/
+
+# Vendor documentation (not redistributable; download from OT Bioelettronica)
+*.pdf
