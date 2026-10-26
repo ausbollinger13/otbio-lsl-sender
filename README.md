@@ -84,8 +84,8 @@ The device configuration commands follow OT Bioelettronica's *Quattrocento confi
 
 ## Authors
 
-- **ausbollinger** ([@ausbollinger13](https://github.com/ausbollinger13)): author and maintainer. Co-developed the original version, then added TTL marker detection, `push_chunk` streaming, sample-accurate marker timing and the high-frame-rate latency fixes.
-- **David Pruitt** ([@davepruitt](https://github.com/davepruitt)): co-author of the original version (Quattrocento reader, LSL integration, GUI, error alarm).
+- **ausbollinger** ([@ausbollinger13](https://github.com/ausbollinger13)): author and maintainer. Added TTL marker detection, `push_chunk` streaming, sample-accurate marker timing and the high-frame-rate latency fixes.
+- **David Pruitt** ([@davepruitt](https://github.com/davepruitt)): author of the original version (Quattrocento reader, LSL integration, GUI, error alarm).
 
 Originally developed at the Texas Biomedical Device Center (TxBDC), University of Texas at Dallas.
 
